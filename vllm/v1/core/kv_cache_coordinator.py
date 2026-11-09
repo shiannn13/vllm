@@ -234,6 +234,9 @@ class KVCacheCoordinator(ABC):
 
         """
         num_blocks_to_allocate = 0
+        '''
+        memba
+        '''
         if self.retention_interval != 0:
             prefill_end = 0
         for i, manager in enumerate(self.single_type_managers):

@@ -505,7 +505,7 @@ class KVCacheManager:
             new_computed_block_list = self.empty_kv_cache_blocks.blocks
 
         # The number of computed tokens is the number of computed tokens plus
-        # the new prefix caching hits
+        # the new prefix caching hits: num_new_computed_tokens
         num_local_computed_tokens = (
             request.num_computed_tokens + num_new_computed_tokens
         )
@@ -514,6 +514,10 @@ class KVCacheManager:
             self.max_model_len,
         )
 
+        '''
+        如果當前的 request 是新來的(waiting, preepted) 如果要把他們加進來running
+        要先預留一些 block budget，避免原先已經在跑的 request 未來沒有 blocks可以用
+        '''
         watermark_blocks = 0
         # The watermark is applied to waiting/preempted requests only, and only
         # when there's at least one request already scheduled.
@@ -525,8 +529,19 @@ class KVCacheManager:
 
         # Matches the scheduler's own prefill boundary: `num_tokens - 1`
         # extends it to resumed requests replaying their output tokens.
+        '''
+        For Mamba
+        '''
         prefill_end = max(request.num_prompt_tokens, request.num_tokens - 1)
 
+
+        '''
+        這段的目的是當 chunked prefill enabled 時
+        因為上層只會計算當前的 chunk 需要多少 token
+        但是可能完整的 prefill 需要的 block 超過 pool 所能供給
+        這樣未來還是很可能被preempt 所以會先在這裡判斷 block 夠不夠用
+        但這裡只是做檢查，並沒有真的配 block
+        '''
         if full_sequence_must_fit:
             # First check and fail if the full request sequence won't fit.
             full_num_tokens = min(request.num_tokens, self.max_model_len)
@@ -560,6 +575,10 @@ class KVCacheManager:
         # Free on the processed-token basis: in-flight steps' attention windows
         # still read blocks below the optimistic boundary, and rejected spec
         # tokens can roll it back.
+        '''
+        num_in_flight_tokens 是被排進schedule 但是還沒被Model executor計算的tokens數
+        所以減掉的原因是為了避免還需要用到的 kv cache 被移除掉
+        '''
         self.coordinator.remove_skipped_blocks(
             request.request_id,
             max(0, total_computed_tokens - request.num_in_flight_tokens),
