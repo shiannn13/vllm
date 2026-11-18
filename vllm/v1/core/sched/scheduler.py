@@ -996,6 +996,9 @@ class Scheduler(SchedulerInterface):
             scheduled_running_reqs.append(request)
             prefill_scheduled |= request.is_prefill_chunk
             request_id = request.request_id
+            '''
+            這應該是用來給 model runner 知道說這輪需要新計算的值需要存放的 block 
+            '''
             req_to_new_blocks[request_id] = new_blocks
             num_scheduled_tokens[request_id] = num_new_tokens
             token_budget -= num_new_tokens
@@ -1416,6 +1419,12 @@ class Scheduler(SchedulerInterface):
                         for i in encoder_inputs_to_schedule
                     )
 
+
+
+                '''
+                load_kv_async == true 指的是這一個 step 要進行 kv load 
+                所以不會進行 model forward
+                '''
                 reserved_blocks = 0
                 if load_kv_async:
                     # An async load holds its blocks for the whole transfer with
@@ -1423,6 +1432,11 @@ class Scheduler(SchedulerInterface):
                     # only if it fits in (free - other in-flight reservations)
                     # plus its own spec decode step blocks, to avoid deadlock and
                     # predictable preemptions.
+                    '''
+                    _inflight_prefill_reserved_blocks 是 chunked prefill 用來保留完整 prefill
+                    所需要的 blocks 保留量
+                    _spec_decode_step_blocks 是要為spec decode 保留 kv blocks 包括 target model 跟 look ahead
+                    '''
                     reserved_blocks = (
                         self._inflight_prefill_reserved_blocks()
                         + self._spec_decode_step_blocks

@@ -491,6 +491,9 @@ class KVCacheManager:
 
         if new_computed_blocks is not None:
             new_computed_block_list = new_computed_blocks.blocks
+            '''
+            特殊的kv cache group
+            '''
             if self.retained_hit_group_ids:
                 # Only retain the prefix covered by the local and external hits.
                 reused = num_new_computed_tokens + num_external_computed_tokens
@@ -541,6 +544,12 @@ class KVCacheManager:
         但是可能完整的 prefill 需要的 block 超過 pool 所能供給
         這樣未來還是很可能被preempt 所以會先在這裡判斷 block 夠不夠用
         但這裡只是做檢查，並沒有真的配 block
+
+        因為 Chunked Prefill 每次只 Allocate 當前 Chunk 的 KV Blocks
+        所以 Admission Check 要提前評估完整 Sequence 的容量需求
+        但對於 Sliding Window，完整 Sequence 的 KV 不需要全部同時存在
+        因此使用 max_admission_blocks_per_request 限制預估需求
+        避免過度保守地拒絕 Request。
         '''
         if full_sequence_must_fit:
             # First check and fail if the full request sequence won't fit.
@@ -561,6 +570,11 @@ class KVCacheManager:
             if required_blocks > self.block_pool.get_num_free_blocks():
                 return None
 
+
+        '''
+        num_lookahead_tokens 是 draft model 可能會用到的 kv slots 
+        會根據不同的 draft method 有可能沒有lookahead tokens
+        '''
         num_tokens_main_model = total_computed_tokens + num_new_tokens
         num_tokens_need_slot = min(
             num_tokens_main_model + num_lookahead_tokens, self.max_model_len
@@ -636,6 +650,9 @@ class KVCacheManager:
         # "non-committable" tokens (e.g., draft tokens that could be rejected).
         # Therefore, we cap the number at `request.num_tokens`, ensuring only
         # "finalized" tokens are cached.
+        '''
+        speculative decoding 可能會有還沒計算好的 new token
+        '''
         num_tokens_to_cache = min(
             total_computed_tokens + num_new_tokens,
             request.num_tokens,

@@ -235,6 +235,14 @@ class SingleTypeKVCacheManager(ABC):
             # num_required_blocks may be smaller than num_req_blocks.
             return max(num_required_blocks - num_req_blocks, 0)
 
+        '''
+        num_skipped_tokens 代表的是有多少token 可以不用保存他們的kv block(sliding window) 
+        前面可以走 fast path 不用去考慮 skipped blocks 跟 prefix cache blocks 的原因是
+        1. skipped_blocks 在 block table 裡面會被標記成 null block 而不是直接移除
+        2. prefix cache block 會在 request 進來 running(from waiting or preempt) 的第一個 step 就
+        全部認領完 
+        所以非在running 做第一次 step block table 的長度會包含這兩個 不用額外去計算出來
+        '''
         num_skipped_tokens = self.get_num_skipped_tokens(total_computed_tokens)
         num_local_computed_blocks = len(new_computed_blocks) + num_req_blocks
         # Number of whole blocks that are skipped by the attention window.
@@ -256,13 +264,31 @@ class SingleTypeKVCacheManager(ABC):
         # If a computed block is an eviction candidate (in the free queue and
         # ref_cnt == 0), it will be removed from the free queue when touched by
         # the allocated request, so we must count it in the free-capacity check.
+        '''
+        這裡是要把 已經在 free queue(ref_cnt=0)的 prefix blocks 給算進來
+        因為雖然他們的kv還在 但是已經不存在於 block pool 裡面
+        所以後續撿回來 他們的數量也要包含在內
+        slice num_skipped_new_computed_blocks 的原因是因為
+        超出 sliding window 的 prefix 也不會用到 所以不用把他算進來
+        '''
         num_evictable_blocks = self._get_num_evictable_blocks(
             new_computed_blocks[num_skipped_new_computed_blocks:]
         )
+        '''
+        這裡是為了支援 partial prefix cache 
+        也就是可以使用不完整 block 的 prefix cache 
+        會檢查是不是會用到 partial prefix cache(也就是 perfix cache 沒有剛好落在 block 邊界上)
+        有的話需要多 allocate 一個 block 因為 partial-hit 是 copy on write 的機制
+        需要 new 一個 block 來存放跟完整 prefix cache block 的diff
+        '''
         if self._has_partial_local_hit(new_computed_blocks, num_local_computed_tokens):
             # Reserve the extra block that allocate_new_blocks pulls for the
             # partial-hit CoW redirect.
             num_new_blocks += 1
+
+        '''
+        新 block 需求 + cache 認領需求
+        '''
         return num_new_blocks + num_evictable_blocks
 
     def add_local_computed_blocks(
@@ -289,6 +315,9 @@ class SingleTypeKVCacheManager(ABC):
         # The coordinator only calls this for first-time allocations (running
         # requests are short-circuited there), so the request has no blocks yet.
         req_blocks = self.req_to_blocks[request_id]
+        '''
+        只給 Request 首次進入 Running 建立 block table
+        '''
         assert len(req_blocks) == 0
         num_total_computed_tokens = (
             num_local_computed_tokens + num_external_computed_tokens
@@ -301,6 +330,10 @@ class SingleTypeKVCacheManager(ABC):
             new_computed_blocks = new_computed_blocks[num_skipped_blocks:]
 
         # Touch the computed blocks to make sure they won't be evicted.
+        '''
+        因為 local prefix cache儘管disable 
+        kv connector也有可能有 external computed tokens 所以在這裡要做驗證
+        '''
         if self.enable_caching:
             self.block_pool.touch(new_computed_blocks)
         else:
@@ -315,7 +348,13 @@ class SingleTypeKVCacheManager(ABC):
         # All cached hits (including skipped nulls) are already cached; mark
         # them so cache_blocks() will not try to re-cache blocks that already
         # have a block_hash set.
+        '''
+        用來記錄前幾個blocks為 cache的 cursor
+        '''
         self.num_cached_block[request_id] = len(req_blocks)
+        '''
+        Fine-grained Prefix Cache Lookup 使用 copy on write
+        '''
         if self._has_partial_local_hit(new_computed_blocks, num_local_computed_tokens):
             # Record the partial tail for the CoW redirect in
             # allocate_new_blocks; cap the cached count at the full blocks so
@@ -364,6 +403,9 @@ class SingleTypeKVCacheManager(ABC):
         )
         allocated_blocks = self.block_pool.get_new_blocks(num_new_blocks)
         req_blocks.extend(allocated_blocks)
+        '''
+        紀錄需要被清零的 block id
+        '''
         if self._record_new_block_ids and record_for_zeroing:
             self.new_block_ids.extend(b.block_id for b in allocated_blocks)
 
@@ -701,6 +743,9 @@ class SingleTypeKVCacheManager(ABC):
                 by the default implementation.
 
         """
+        '''
+        num_prompt_tokens 是給特殊的 skipped block回收策略使用 像是 R-SWA
+        '''
         del num_prompt_tokens
         # Remove the blocks that will be skipped during attention computation.
         num_skipped_tokens = self.get_num_skipped_tokens(processed_computed_tokens)
@@ -1177,6 +1222,10 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
             The number of tokens that will be skipped for attention computation.
 
         """
+        '''
+        Multi-module 類型的 Speculative Decoding 像是 MTP 可能需要保留序列尾端的 token 
+        所以可以設定 extra_retained_tokens 來額外保留
+        '''
         return max(
             0,
             num_computed_tokens - self.sliding_window + 1 - self.extra_retained_tokens,

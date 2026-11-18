@@ -240,6 +240,10 @@ class KVCacheCoordinator(ABC):
         if self.retention_interval != 0:
             prefill_end = 0
         for i, manager in enumerate(self.single_type_managers):
+            '''
+            
+            cross attention 只看 encoder 的 attention
+            '''
             if isinstance(manager, CrossAttentionManager):
                 # For cross-attention, we issue a single static allocation
                 # of blocks based on the number of encoder input tokens.
@@ -299,6 +303,14 @@ class KVCacheCoordinator(ABC):
         # cache-hit blocks, then allocate external blocks for every group. This
         # ensures an earlier group's external `get_new_blocks` cannot evict a
         # later group's not-yet-touched cache-hit blocks.
+        '''
+        先做完全部Local cache 再做 external 的原因:
+        因為讓他們非同步地做的話 有可能會發生 local 想要使用 ref_cnt 為0的 block
+        但是 allocate external blocks 先把他給 evict
+        '''
+        '''
+        local prefix cache
+        '''
         for i, manager in enumerate(self.single_type_managers):
             manager.add_local_computed_blocks(
                 request_id,
@@ -306,6 +318,10 @@ class KVCacheCoordinator(ABC):
                 num_local_computed_tokens,
                 num_external_computed_tokens,
             )
+
+        '''
+        kv connector
+        '''
         if num_external_computed_tokens > 0:
             for i, manager in enumerate(self.single_type_managers):
                 manager.allocate_external_computed_blocks(
